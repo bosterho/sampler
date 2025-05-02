@@ -3,9 +3,20 @@
 PluginEditor::PluginEditor (PluginProcessor& p)
     : AudioProcessorEditor (&p), processorRef (p)
 {
-    juce::ignoreUnused (processorRef);
-
     addAndMakeVisible (inspectButton);
+    addAndMakeVisible (fileNameLabel);
+    
+    // Initial filename display
+    juce::String initialPath = processorRef.getLoadedFilePath();
+    if (initialPath.isNotEmpty())
+    {
+        juce::File file(initialPath);
+        fileNameLabel.setText(file.getFileName(), juce::dontSendNotification);
+    }
+    else
+    {
+        fileNameLabel.setText("No Sample Loaded - Using Default", juce::dontSendNotification);
+    }
 
     // this chunk of code instantiates and opens the melatonin inspector
     inspectButton.onClick = [&] {
@@ -20,7 +31,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
 
     // Make sure that before the constructor has finished, you've set the
     // editor's size to whatever you need it to be.
-    setSize (400, 300);
+    setSize (500, 400);
 }
 
 PluginEditor::~PluginEditor()
@@ -35,14 +46,44 @@ void PluginEditor::paint (juce::Graphics& g)
     auto area = getLocalBounds();
     g.setColour (juce::Colours::white);
     g.setFont (16.0f);
-    auto helloWorld = juce::String ("Hello from ") + PRODUCT_NAME_WITHOUT_VERSION + " v" VERSION + " running in " + CMAKE_BUILD_TYPE;
-    g.drawText (helloWorld, area.removeFromTop (150), juce::Justification::centred, false);
+    auto helloWorld = juce::String ("Sampler Plugin ") + PRODUCT_NAME_WITHOUT_VERSION + " v" VERSION;
+    g.drawText (helloWorld, area.removeFromTop (50), juce::Justification::centred, false);
+    
+    g.setFont(14.0f);
+    g.drawText("Drop audio files here to load samples", area.removeFromTop(30), juce::Justification::centred, false);
 }
 
 void PluginEditor::resized()
 {
-    // layout the positions of your child components here
-    auto area = getLocalBounds();
-    area.removeFromBottom(50);
-    inspectButton.setBounds (getLocalBounds().withSizeKeepingCentre(100, 50));
+    auto area = getLocalBounds().reduced(20);
+    
+    auto topArea = area.removeFromTop(160);
+    inspectButton.setBounds(topArea.removeFromBottom(50).withSizeKeepingCentre(100, 40));
+    
+    fileNameLabel.setBounds(area.removeFromTop(50).withSizeKeepingCentre(300, 30));
+}
+
+bool PluginEditor::isInterestedInFileDrag(const juce::StringArray& files)
+{
+    for (auto file : files)
+    {
+        if (file.endsWith(".wav") || file.endsWith(".aif") || file.endsWith(".aiff"))
+            return true;
+    }
+    
+    return false;
+}
+
+void PluginEditor::filesDropped(const juce::StringArray& files, int x, int y)
+{
+    for (auto file : files)
+    {
+        if (file.endsWith(".wav") || file.endsWith(".aif") || file.endsWith(".aiff"))
+        {
+            processorRef.loadFile(file);
+            juce::File loadedFile(file);
+            fileNameLabel.setText(loadedFile.getFileName(), juce::dontSendNotification);
+            break;
+        }
+    }
 }

@@ -141,6 +141,7 @@ target_link_libraries(SharedCode
     melatonin_inspector
     juce_audio_utils
     juce_audio_processors
+    juce_audio_formats    # Explicit support for audio file formats
     juce_dsp
     juce_gui_basics
     juce_gui_extra

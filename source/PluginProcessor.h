@@ -1,6 +1,7 @@
 #pragma once
 
 #include <juce_audio_processors/juce_audio_processors.h>
+#include <juce_audio_utils/juce_audio_utils.h>
 
 #if (MSVC)
 #include "ipps.h"
@@ -38,6 +39,22 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+    void loadFile(const juce::String& path);
+    void loadFile(const juce::File& file);
+    juce::AudioFormatManager& getFormatManager() { return formatManager; }
+    juce::Synthesiser& getSampler() { return sampler; }
+    juce::String getLoadedFilePath() const { return currentlyLoadedFilePath; }
+    
+    juce::File getDefaultSampleDirectory() const;
+    juce::File getDefaultSampleFile() const;
+    void loadDefaultSample();
+    
 private:
+    juce::Synthesiser sampler;
+    juce::AudioFormatManager formatManager;
+    juce::AudioFormatReader* formatReader { nullptr };
+    juce::String currentlyLoadedFilePath;
+    int voiceCount { 128 };  // Maximum number of voices
+    
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
 };

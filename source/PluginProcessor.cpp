@@ -12,6 +12,14 @@ PluginProcessor::PluginProcessor()
                      #endif
                        )
 {
+    formatManager.registerBasicFormats();
+    
+    // Initialize the sampler with voices
+    for (int i = 0; i < voiceCount; ++i)
+        sampler.addVoice(new juce::SamplerVoice());
+        
+    // Try to load the default sample
+    loadDefaultSample();
 }
 
 PluginProcessor::~PluginProcessor()
@@ -86,9 +94,7 @@ void PluginProcessor::changeProgramName (int index, const juce::String& newName)
 //==============================================================================
 void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 {
-    // Use this method as the place to do any pre-playback
-    // initialisation that you need..
-    juce::ignoreUnused (sampleRate, samplesPerBlock);
+    sampler.setCurrentPlaybackSampleRate(sampleRate);
 }
 
 void PluginProcessor::releaseResources()
@@ -122,33 +128,17 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                               juce::MidiBuffer& midiMessages)
 {
-    juce::ignoreUnused (midiMessages);
-
     juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
-    // In case we have more outputs than inputs, this code clears any output
-    // channels that didn't contain input data, (because these aren't
-    // guaranteed to be empty - they may contain garbage).
-    // This is here to avoid people getting screaming feedback
-    // when they first compile a plugin, but obviously you don't need to keep
-    // this code if your algorithm always overwrites all the output channels.
+    // In case we have more outputs than inputs, clear any output
+    // channels that didn't contain input data
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // This is the place where you'd normally do the guts of your plugin's
-    // audio processing...
-    // Make sure to reset the state if your inner loop is processing
-    // the samples and the outer loop is handling the channels.
-    // Alternatively, you can process the samples with the channels
-    // interleaved by keeping the same state.
-    for (int channel = 0; channel < totalNumInputChannels; ++channel)
-    {
-        auto* channelData = buffer.getWritePointer (channel);
-        juce::ignoreUnused (channelData);
-        // ..do something to the data...
-    }
+    // Process the MIDI and generate audio
+    sampler.renderNextBlock(buffer, midiMessages, 0, buffer.getNumSamples());
 }
 
 //==============================================================================
@@ -165,17 +155,44 @@ juce::AudioProcessorEditor* PluginProcessor::createEditor()
 //==============================================================================
 void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
-    juce::ignoreUnused (destData);
+    juce::ValueTree state("SamplerPluginState");
+    state.setProperty("filePath", currentlyLoadedFilePath, nullptr);
+    
+    std::unique_ptr<juce::XmlElement> xml(state.createXml());
+    copyXmlToBinary(*xml, destData);
 }
 
 void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
-    juce::ignoreUnused (data, sizeInBytes);
+    std::unique_ptr<juce::XmlElement> xmlState(getXmlFromBinary(data, sizeInBytes));
+    
+    if (xmlState != nullptr)
+    {
+        juce::ValueTree state = juce::ValueTree::fromXml(*xmlState);
+        juce::String savedFilePath = state.getProperty("filePath", "");
+        
+        if (savedFilePath.isNotEmpty())
+        {
+            juce::File file(savedFilePath);
+            if (file.existsAsFile())
+            {
+                loadFile(file);
+            }
+            else
+            {
+                // If the saved file doesn't exist, try to load the default sample
+                loadDefaultSample();
+            }
+        }
+        else
+        {
+            loadDefaultSample();
+        }
+    }
+    else
+    {
+        loadDefaultSample();
+    }
 }
 
 //==============================================================================
@@ -183,4 +200,108 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new PluginProcessor();
+}
+
+void PluginProcessor::loadFile(const juce::String& path)
+{
+    loadFile(juce::File(path));
+}
+
+void PluginProcessor::loadFile(const juce::File& file)
+{
+    if (!file.existsAsFile())
+        return;
+
+    // Clear existing sounds
+    sampler.clearSounds();
+    
+    // Create a reader for the file
+    auto* reader = formatManager.createReaderFor(file);
+    
+    if (reader != nullptr)
+    {
+        // Get the length of the audio file
+        auto sampleLength = static_cast<int>(reader->lengthInSamples);
+        
+        // Create a buffer with the entire audio content
+        juce::BigInteger allNotes;
+        allNotes.setRange(0, 128, true);
+        
+        // Create a sample buffer
+        juce::AudioBuffer<float> buffer(reader->numChannels, sampleLength);
+        reader->read(&buffer, 0, sampleLength, 0, true, true);
+        
+        // Create a sound with range covering all notes
+        auto sound = new juce::SamplerSound(file.getFileName(),
+                                           *reader,
+                                           allNotes,
+                                           60,   // Root note (Middle C)
+                                           0.1,  // Attack time
+                                           0.1,  // Release time
+                                           10.0); // Maximum sample length
+        
+        sampler.addSound(sound);
+        currentlyLoadedFilePath = file.getFullPathName();
+        
+        delete reader;
+    }
+}
+
+void PluginProcessor::loadDefaultSample()
+{
+    auto sampleFile = getDefaultSampleFile();
+    
+    if (sampleFile.existsAsFile())
+    {
+        loadFile(sampleFile);
+    }
+    else
+    {
+        // If the default sample doesn't exist, check if there's any sample in the directory
+        auto directory = getDefaultSampleDirectory();
+        
+        if (directory.isDirectory())
+        {
+            // Look for any supported audio file
+            for (const auto& entry : juce::RangedDirectoryIterator(directory, false, "*.wav;*.aif;*.aiff"))
+            {
+                auto file = entry.getFile();
+                if (file.existsAsFile())
+                {
+                    loadFile(file);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+juce::File PluginProcessor::getDefaultSampleDirectory() const
+{
+    // Common locations for application data
+    #if JUCE_MAC
+        // On macOS, a good place is in the Application Support directory
+        return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                .getChildFile("Osterhouse Sounds")
+                .getChildFile("Sampler")
+                .getChildFile("Samples");
+    #elif JUCE_WINDOWS
+        // On Windows, use the AppData directory
+        return juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
+                .getChildFile("Osterhouse Sounds")
+                .getChildFile("Sampler")
+                .getChildFile("Samples");
+    #else
+        // Linux or other platforms
+        return juce::File::getSpecialLocation(juce::File::userHomeDirectory)
+                .getChildFile(".osterhousesounds")
+                .getChildFile("sampler")
+                .getChildFile("samples");
+    #endif
+}
+
+juce::File PluginProcessor::getDefaultSampleFile() const
+{
+    // Return the path to the default sample file
+    return getDefaultSampleDirectory().getChildFile("default_sample.wav");
 }
