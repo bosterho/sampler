@@ -81,8 +81,9 @@ juce_add_plugin("${PROJECT_NAME}"
     # Whether the plugin is a synth. Will be used to set sensible plugin category values if they are not provided explicitly.
     IS_SYNTH TRUE
 
-    # Whether the plugin should provide a midi input.
+    # Whether the plugin should provide a midi input and output
     NEEDS_MIDI_INPUT TRUE
+    NEEDS_MIDI_OUTPUT TRUE
 
     # The name of your final executable
     # This is how it's listed in the DAW

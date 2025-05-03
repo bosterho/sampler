@@ -3,6 +3,7 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 
+// A class that manages audio data streaming in chunks
 class StreamingSamplerSound : public juce::SamplerSound
 {
 public:
@@ -12,7 +13,8 @@ public:
                          int midiNoteForNormalPitch,
                          double attackTimeSecs,
                          double releaseTimeSecs,
-                         double maxSampleLengthSeconds);
+                         double maxSampleLengthSeconds,
+                         const juce::String& sourceFilePath = "");
     
     ~StreamingSamplerSound() override;
     
@@ -21,42 +23,73 @@ public:
     bool appliesToNote(int midiNoteNumber) override;
     bool appliesToChannel(int midiChannel) override;
     
+    // Get a specific sample from the audio data, loading it if needed
+    float getSample(int channel, int sampleIndex);
+    
     // Streaming specific methods
-    void startBackgroundLoading();
     bool isFullyLoaded() const { return fullyLoaded.load(); }
     bool isLoading() const { return loading.load(); }
     
-    // Get the buffer (might be partially loaded)
-    const juce::AudioBuffer<float>& getAudioData() const { return data; }
+    // Manually trigger background loading of all chunks
+    void startBackgroundLoading();
+    
+    // Get the original file length in samples
+    int getLengthInSamples() const { return lengthInSamples; }
+    int getNumChannels() const { return numChannels; }
+    
+    // Public properties needed by StreamingSamplerVoice
+    juce::ADSR::Parameters params;
+    double sourceSampleRate;
+    int midiRootNote;
     
 private:
     juce::String name;
-    juce::AudioBuffer<float> data;
     juce::BigInteger midiNotes;
-    int midiRootNote = 60;
     double attackTime = 0.01;
     double releaseTime = 0.01;
     
-    // File path to enable reloading
+    // File path to enable streaming
     juce::String filePath;
     
-    // Format reader for background loading
-    std::unique_ptr<juce::AudioFormatReader> backgroundReader;
+    // File information
+    int lengthInSamples = 0;
+    int numChannels = 0;
+    int bitsPerSample = 0;
     
     // Thread synchronization
     std::atomic<bool> fullyLoaded { false };
     std::atomic<bool> loading { false };
     
-    // Background loading method
-    void loadCompleteFile();
+    // Chunk-based streaming system
+    static constexpr int CHUNK_SIZE = 32768; // 32KB chunks
+    static constexpr int INITIAL_CHUNKS = 2; // Number of chunks to preload
     
-    static constexpr int INITIAL_LOAD_SIZE = 60 * 1024; // 60 KB in samples
+    struct Chunk {
+        juce::AudioBuffer<float> data;
+        std::atomic<bool> loaded { false };
+    };
     
-    // Convert bytes to samples based on file format
-    static int bytesToSamples(int bytes, int numChannels, int bitsPerSample)
-    {
-        return bytes / ((bitsPerSample / 8) * numChannels);
-    }
+    // Store chunks in a vector
+    std::vector<std::unique_ptr<Chunk>> chunks;
+    
+    // Reader for background loading
+    std::unique_ptr<juce::AudioFormatReader> reader;
+    
+    // Mutex for thread-safe chunk access
+    juce::CriticalSection chunkMutex;
+    
+    // Load a specific chunk
+    void loadChunk(int chunkIndex);
+    
+    // Calculate which chunk contains a particular sample
+    int sampleToChunkIndex(int sampleIndex) const;
+    
+    // Background thread for prefetching chunks
+    std::unique_ptr<juce::TimeSliceThread> prefetchThread;
+    class PrefetchJob;
+    std::unique_ptr<PrefetchJob> prefetchJob;
+    
+    friend class PrefetchJob;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(StreamingSamplerSound)
 };
