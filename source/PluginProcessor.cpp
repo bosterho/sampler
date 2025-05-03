@@ -158,7 +158,6 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                       juce::MidiBuffer& midiMessages)
 {
-    // juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
@@ -167,7 +166,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
 
-    // Process MIDI through the arpeggiator if enabled and not disabled for debugging
+    // Process MIDI through the arpeggiator if enabled
     if (*arpEnabled)
     {
         // Process the arpeggiator on the MIDI messages
@@ -187,30 +186,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
             int noteNumber = message.getNoteNumber();
             int velocity = message.getVelocity();
             
-            DBG("MIDI Note ON: Note=" + juce::String(noteNumber) + 
-                " Velocity=" + juce::String(velocity) +
-                (*arpEnabled ? " (Arpeggiator active)" : ""));
-            
-            // Check which sample would be triggered for this note and velocity
-            bool foundMatchingSample = false;
-            for (auto* info : sampleInfos)
-            {
-                if (info->midiNote == noteNumber && 
-                    info->velocityRange.contains(velocity))
-                {
-                    // DBG("  Matching sample: " + info->file.getFileName() + 
-                        // " (Note: " + juce::String(info->midiNote) + 
-                        // ", Velocity range: " + juce::String(info->velocityRange.getStart()) + 
-                        // "-" + juce::String(info->velocityRange.getEnd()) + ")");
-                    foundMatchingSample = true;
-                }
-            }
-            
-            // if (!foundMatchingSample)
-            // {
-                // DBG("  No matching sample found for this note/velocity combination");
-            // }
-            
             // Check if we should start loading full samples in the background
             if (!sampleTriggered.load() && !disableDiskStreaming)
             {
@@ -226,7 +201,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                         {
                             streamingSound->startBackgroundLoading();
                             sampleTriggered.store(true);
-                            // DBG("  Started background loading for: " + sound->file.getFileName());
                             break;
                         }
                     }
@@ -238,8 +212,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         }
         else if (message.isNoteOff())
         {
-            int noteNumber = message.getNoteNumber();
-            // DBG("MIDI Note OFF: Note=" + juce::String(noteNumber));
             processedMidi.addEvent(message, metadata.samplePosition);
         }
         else
@@ -249,27 +221,12 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
         }
     }
 
-    // Print streaming status for all samples periodically (every 30 blocks)
+    // Periodically check for inactive chunks and unload them to save memory
     static int blockCounter = 0;
     if (++blockCounter >= 30)
     {
         blockCounter = 0;
-        
-        // Output loading status of samples
-        if (sampler.getNumSounds() > 0)
-        {
-            // DBG("Sample loading status:");
-            for (int i = 0; i < sampler.getNumSounds(); ++i)
-            {
-                auto* streamingSound = dynamic_cast<StreamingSamplerSound*>(sampler.getSound(i).get());
-                if (streamingSound != nullptr)
-                {
-                    // DBG("  Sample " + juce::String(i+1) + ": " + 
-                        // (streamingSound->isFullyLoaded() ? "FULLY LOADED" : 
-                        //  (streamingSound->isLoading() ? "LOADING..." : "PARTIALLY LOADED")));
-                }
-            }
-        }
+        streamingThreadManager->checkAndUnloadInactiveChunks();
     }
 
     // Process the MIDI through the sampler to generate audio
@@ -335,11 +292,6 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new PluginProcessor();
-}
-
-void PluginProcessor::loadFile(const juce::String& path)
-{
-    loadFile(juce::File(path));
 }
 
 void PluginProcessor::loadFile(const juce::File& file)
@@ -520,9 +472,6 @@ void PluginProcessor::loadAllSamplesFromUserFolder()
         sampleInfos.add(info);
         addSampleToSampler(*info);
     }
-    
-    // Log how many samples were loaded
-    juce::Logger::writeToLog("Loaded " + juce::String(sampleInfos.size()) + " samples");
 }
 
 void PluginProcessor::parseSampleFilename(const juce::File& file, SampleInfo& info)
@@ -640,12 +589,10 @@ void PluginProcessor::processArpeggiator(juce::AudioBuffer<float>& buffer, juce:
         if (msg.isNoteOn())
         {
             arpNotes.add(msg.getNoteNumber());
-            // DBG("Arp: Added note " + juce::String(msg.getNoteNumber()) + " to arp list");
         }
         else if (msg.isNoteOff())
         {
             arpNotes.removeValue(msg.getNoteNumber());
-            // DBG("Arp: Removed note " + juce::String(msg.getNoteNumber()) + " from arp list");
         }
         else
         {
@@ -667,7 +614,6 @@ void PluginProcessor::processArpeggiator(juce::AudioBuffer<float>& buffer, juce:
         if (arpLastNoteValue > 0)
         {
             arpMidiBuffer.addEvent(juce::MidiMessage::noteOff(1, arpLastNoteValue), offset);
-            // DBG("Arp: Note OFF - " + juce::String(arpLastNoteValue) + " at offset " + juce::String(offset));
             arpLastNoteValue = -1;
         }
         
@@ -726,8 +672,6 @@ void PluginProcessor::processArpeggiator(juce::AudioBuffer<float>& buffer, juce:
             // Trigger the selected note
             arpLastNoteValue = arpNotes[arpCurrentNote];
             arpMidiBuffer.addEvent(juce::MidiMessage::noteOn(1, arpLastNoteValue, (juce::uint8)100), offset);
-            // DBG("Arp: Note ON - " + juce::String(arpLastNoteValue) + " at offset " + juce::String(offset) + 
-                // " (pattern: " + arpPattern->getCurrentChoiceName() + ")");
         }
         
         // Reset time if we've gone past the duration

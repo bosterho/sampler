@@ -1,4 +1,9 @@
 #include "StreamingSamplerSound.h"
+#include "PluginProcessor.h"
+#include "PluginEditor.h"
+
+// Static definition for memory tracker (empty implementation)
+std::atomic<size_t> MemoryTracker::totalAllocated {0};
 
 // Implementation of the PrefetchClient
 PrefetchClient::PrefetchClient(StreamingThreadManager& owner) 
@@ -121,6 +126,56 @@ void StreamingThreadManager::prioritizeSound(StreamingSamplerSound* sound)
     }
 }
 
+void StreamingThreadManager::checkAndUnloadInactiveChunks()
+{
+    const juce::ScopedLock sl(soundsLock);
+    juce::int64 currentTime = juce::Time::currentTimeMillis();
+    
+    // Define constants for chunk management
+    constexpr juce::int64 CHUNK_INACTIVE_THRESHOLD_MS = 5000; // 5 seconds
+    
+    // Go through all sounds
+    for (auto* sound : managedSounds)
+    {
+        if (sound == nullptr)
+            continue;
+        
+        // Check how many chunks are loaded
+        int loadedChunkCount = sound->getNumberOfLoadedChunks();
+        int totalChunks = sound->getNumberOfChunks();
+        
+        // If we have a high percentage of chunks loaded, try to be more aggressive about unloading
+        bool aggressiveUnloading = (loadedChunkCount > INITIAL_CHUNKS + 5) && 
+                                   (loadedChunkCount > totalChunks / 2);
+        
+        // Check each chunk
+        for (int i = 0; i < sound->chunks.size(); ++i)
+        {
+            // Skip if chunk isn't loaded
+            if (!sound->chunks[i]->loaded.load())
+                continue;
+                
+            // Skip if this is an initial chunk (keep these loaded for responsiveness)
+            if (i < StreamingSamplerSound::INITIAL_CHUNKS)
+                continue;
+            
+            // Check if this chunk hasn't been accessed for a while
+            juce::int64 timeSinceLastAccess = currentTime - sound->chunkLastAccessTime[i];
+            
+            // Use a shorter threshold for aggressive unloading
+            bool shouldUnload = aggressiveUnloading ? 
+                               (timeSinceLastAccess > CHUNK_INACTIVE_THRESHOLD_MS / 2) :
+                               (timeSinceLastAccess > CHUNK_INACTIVE_THRESHOLD_MS);
+                               
+            if (shouldUnload)
+            {
+                // Unload this inactive chunk
+                sound->unloadChunk(i);
+            }
+        }
+    }
+}
+
 // Implementation of StreamingSamplerSound
 StreamingSamplerSound::StreamingSamplerSound(const juce::String& soundName,
                                          juce::AudioFormatReader& source,
@@ -131,9 +186,7 @@ StreamingSamplerSound::StreamingSamplerSound(const juce::String& soundName,
                                          double maxSampleLengthSeconds,
                                          StreamingThreadManager* thManager,
                                          const juce::String& sourceFilePath)
-    : juce::SamplerSound(soundName, source, notes, midiNoteForNormalPitch, 
-                        attackTimeSecs, releaseTimeSecs, maxSampleLengthSeconds),
-      name(soundName),
+    : name(soundName),
       midiNotes(notes),
       midiRootNote(midiNoteForNormalPitch),
       attackTime(attackTimeSecs),
@@ -154,6 +207,7 @@ StreamingSamplerSound::StreamingSamplerSound(const juce::String& soundName,
     // Calculate how many chunks we need
     int numChunksNeeded = (lengthInSamples + CHUNK_SIZE - 1) / CHUNK_SIZE;
     chunks.resize(numChunksNeeded);
+    chunkLastAccessTime.resize(numChunksNeeded, 0); // Initialize access times
     
     // Create empty chunks
     for (int i = 0; i < numChunksNeeded; ++i)
@@ -161,15 +215,32 @@ StreamingSamplerSound::StreamingSamplerSound(const juce::String& soundName,
         chunks[i] = std::make_unique<Chunk>();
     }
     
-    // Create a reader for the file
+    // Create a reader for the file - using shared formatManager to avoid leaking format readers
+    static juce::AudioFormatManager sharedFormatManager;
+    static bool formatsRegistered = false;
+    
+    if (!formatsRegistered)
+    {
+        sharedFormatManager.registerBasicFormats();
+        formatsRegistered = true;
+    }
+    
     if (!filePath.isEmpty())
     {
         juce::File file(filePath);
         if (file.existsAsFile())
         {
-            juce::AudioFormatManager formatManager;
-            formatManager.registerBasicFormats();
-            reader.reset(formatManager.createReaderFor(file));
+            reader.reset(sharedFormatManager.createReaderFor(file));
+        }
+    }
+    else if (source.input != nullptr)
+    {
+        // If we don't have a file path but we have a valid source reader,
+        // try to clone it so we have a persistent reader
+        auto* clonedInput = source.input->createNewReader();
+        if (clonedInput != nullptr)
+        {
+            reader.reset(sharedFormatManager.createReaderFor(std::unique_ptr<juce::InputStream>(clonedInput)));
         }
     }
     
@@ -226,6 +297,9 @@ float StreamingSamplerSound::getSample(int channel, int sampleIndex)
             loadChunk(chunkIndex);
         }
         
+        // Update the access time for this chunk
+        chunkLastAccessTime[chunkIndex] = juce::Time::currentTimeMillis();
+        
         // Return the sample data if the chunk has data
         if (chunk->loaded.load() && chunk->data.getNumSamples() > 0)
         {
@@ -277,6 +351,48 @@ bool StreamingSamplerSound::loadChunk(int chunkIndex)
     return true;
 }
 
+bool StreamingSamplerSound::unloadChunk(int chunkIndex)
+{
+    if (chunkIndex < 0 || chunkIndex >= chunks.size())
+        return false;
+        
+    // Skip if this chunk is already unloaded
+    if (!chunks[chunkIndex]->loaded.load())
+        return false;
+        
+    // Don't unload the initial chunks (to maintain responsiveness)
+    if (chunkIndex < INITIAL_CHUNKS)
+        return false;
+        
+    const juce::ScopedLock sl(chunkMutex);
+    
+    // Free the memory by setting the size to 0
+    chunks[chunkIndex]->data.setSize(0, 0);
+    
+    // Mark the chunk as unloaded
+    chunks[chunkIndex]->loaded.store(false);
+    
+    return true;
+}
+
+// Add method to estimate a chunk's memory size
+size_t StreamingSamplerSound::getEstimatedChunkSize(int chunkIndex) const
+{
+    if (chunkIndex < 0 || chunkIndex >= chunks.size())
+        return 0;
+        
+    // If the chunk is loaded, return the actual size
+    if (chunks[chunkIndex]->loaded.load())
+    {
+        return chunks[chunkIndex]->data.getNumChannels() * chunks[chunkIndex]->data.getNumSamples() * sizeof(float);
+    }
+    
+    // Otherwise, estimate based on chunk properties
+    auto startSample = chunkIndex * CHUNK_SIZE;
+    auto samplesThisChunk = juce::jmin(CHUNK_SIZE, lengthInSamples - startSample);
+    return numChannels * samplesThisChunk * sizeof(float);
+}
+
 int StreamingSamplerSound::sampleToChunkIndex(int sampleIndex) const
 {
     return sampleIndex / CHUNK_SIZE;
@@ -291,4 +407,33 @@ void StreamingSamplerSound::startBackgroundLoading()
     // Prioritize this sound in the thread manager if available
     if (threadManager != nullptr)
         threadManager->prioritizeSound(this);
+}
+
+int StreamingSamplerSound::getNumberOfLoadedChunks() const
+{
+    int count = 0;
+    for (const auto& chunk : chunks)
+    {
+        if (chunk->loaded.load())
+            count++;
+    }
+    return count;
+}
+
+size_t StreamingSamplerSound::getCurrentMemoryUsage() const
+{
+    size_t totalBytes = 0;
+    for (const auto& chunk : chunks)
+    {
+        if (chunk->loaded.load())
+        {
+            totalBytes += chunk->data.getNumChannels() * chunk->data.getNumSamples() * sizeof(float);
+        }
+    }
+    return totalBytes;
+}
+
+void StreamingSamplerSound::dumpMemoryUsage() const
+{
+    // Debug functionality disabled
 }
