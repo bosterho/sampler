@@ -5,6 +5,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
 {
     addAndMakeVisible (inspectButton);
     addAndMakeVisible (fileNameLabel);
+    addAndMakeVisible (loadingStatusLabel);
     
     // Initial filename display
     juce::String initialPath = processorRef.getLoadedFilePath();
@@ -12,10 +13,21 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     {
         juce::File file(initialPath);
         fileNameLabel.setText(file.getFileName(), juce::dontSendNotification);
+        
+        // Initialize loading status
+        auto* sound = processorRef.getCurrentStreamingSound();
+        if (sound != nullptr)
+        {
+            if (sound->isFullyLoaded())
+                loadingStatusLabel.setText("Sample fully loaded", juce::dontSendNotification);
+            else
+                loadingStatusLabel.setText("Initial 60KB loaded. Play to load full sample...", juce::dontSendNotification);
+        }
     }
     else
     {
         fileNameLabel.setText("No Sample Loaded - Using Default", juce::dontSendNotification);
+        loadingStatusLabel.setText("", juce::dontSendNotification);
     }
 
     // this chunk of code instantiates and opens the melatonin inspector
@@ -29,6 +41,9 @@ PluginEditor::PluginEditor (PluginProcessor& p)
         inspector->setVisible (true);
     };
 
+    // Start a timer to update the loading status
+    startTimerHz(10);
+
     // Make sure that before the constructor has finished, you've set the
     // editor's size to whatever you need it to be.
     setSize (500, 400);
@@ -36,6 +51,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
 
 PluginEditor::~PluginEditor()
 {
+    stopTimer();
 }
 
 void PluginEditor::paint (juce::Graphics& g)
@@ -61,6 +77,7 @@ void PluginEditor::resized()
     inspectButton.setBounds(topArea.removeFromBottom(50).withSizeKeepingCentre(100, 40));
     
     fileNameLabel.setBounds(area.removeFromTop(50).withSizeKeepingCentre(300, 30));
+    loadingStatusLabel.setBounds(area.removeFromTop(30).withSizeKeepingCentre(300, 30));
 }
 
 bool PluginEditor::isInterestedInFileDrag(const juce::StringArray& files)
@@ -85,5 +102,30 @@ void PluginEditor::filesDropped(const juce::StringArray& files, int x, int y)
             fileNameLabel.setText(loadedFile.getFileName(), juce::dontSendNotification);
             break;
         }
+    }
+}
+
+void PluginEditor::timerCallback()
+{
+    // Update loading status
+    auto* sound = processorRef.getCurrentStreamingSound();
+    if (sound != nullptr)
+    {
+        if (sound->isFullyLoaded())
+        {
+            loadingStatusLabel.setText("Sample fully loaded", juce::dontSendNotification);
+        }
+        else if (sound->isLoading())
+        {
+            loadingStatusLabel.setText("Loading complete sample...", juce::dontSendNotification);
+        }
+        else
+        {
+            loadingStatusLabel.setText("Initial 60KB loaded. Play to load full sample...", juce::dontSendNotification);
+        }
+    }
+    else
+    {
+        loadingStatusLabel.setText("", juce::dontSendNotification);
     }
 }

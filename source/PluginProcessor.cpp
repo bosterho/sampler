@@ -128,7 +128,7 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
 void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
                                               juce::MidiBuffer& midiMessages)
 {
-    juce::ScopedNoDenormals noDenormals;
+    // juce::ScopedNoDenormals noDenormals;
     auto totalNumInputChannels  = getTotalNumInputChannels();
     auto totalNumOutputChannels = getTotalNumOutputChannels();
 
@@ -136,6 +136,17 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer,
     // channels that didn't contain input data
     for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
         buffer.clear (i, 0, buffer.getNumSamples());
+
+    // Check if we have MIDI input and should start loading the full sample
+    if (!midiMessages.isEmpty() && !sampleTriggered.load())
+    {
+        auto* sound = getCurrentStreamingSound();
+        if (sound != nullptr && !sound->isFullyLoaded())
+        {
+            sound->startBackgroundLoading();
+            sampleTriggered.store(true);
+        }
+    }
 
     // Process the MIDI and generate audio
     sampler.renderNextBlock(buffer, midiMessages, 0, buffer.getNumSamples());
@@ -220,31 +231,53 @@ void PluginProcessor::loadFile(const juce::File& file)
     
     if (reader != nullptr)
     {
+        // Reset the triggered flag when loading a new sample
+        sampleTriggered.store(false);
+        
         // Get the length of the audio file
         auto sampleLength = static_cast<int>(reader->lengthInSamples);
         
-        // Create a buffer with the entire audio content
+        // Create a setup for all MIDI notes
         juce::BigInteger allNotes;
         allNotes.setRange(0, 128, true);
         
-        // Create a sample buffer
-        juce::AudioBuffer<float> buffer(reader->numChannels, sampleLength);
-        reader->read(&buffer, 0, sampleLength, 0, true, true);
-        
-        // Create a sound with range covering all notes
-        auto sound = new juce::SamplerSound(file.getFileName(),
-                                           *reader,
-                                           allNotes,
-                                           60,   // Root note (Middle C)
-                                           0.1,  // Attack time
-                                           0.1,  // Release time
-                                           10.0); // Maximum sample length
+        // Create a streaming sound
+        auto sound = new StreamingSamplerSound(file.getFileName(),
+                                               *reader,
+                                               allNotes,
+                                               60,   // Root note (Middle C)
+                                               0.1,  // Attack time
+                                               0.1,  // Release time
+                                               10.0); // Maximum sample length
         
         sampler.addSound(sound);
         currentlyLoadedFilePath = file.getFullPathName();
         
         delete reader;
     }
+}
+
+// Added method to get the current streaming sampler sound
+StreamingSamplerSound* PluginProcessor::getCurrentStreamingSound()
+{
+    if (sampler.getNumSounds() > 0)
+    {
+        auto* sound = dynamic_cast<StreamingSamplerSound*>(sampler.getSound(0).get());
+        return sound;
+    }
+    return nullptr;
+}
+
+// Added method to check if the sample is fully loaded
+bool PluginProcessor::isSampleFullyLoaded() const
+{
+    if (sampler.getNumSounds() > 0)
+    {
+        auto* sound = dynamic_cast<StreamingSamplerSound*>(sampler.getSound(0).get());
+        if (sound != nullptr)
+            return sound->isFullyLoaded();
+    }
+    return false;
 }
 
 void PluginProcessor::loadDefaultSample()

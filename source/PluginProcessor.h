@@ -2,6 +2,8 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_audio_utils/juce_audio_utils.h>
+#include <juce_dsp/juce_dsp.h>
+#include "StreamingSamplerSound.h"
 
 #if (MSVC)
 #include "ipps.h"
@@ -49,12 +51,33 @@ public:
     juce::File getDefaultSampleFile() const;
     void loadDefaultSample();
     
+    // Sample playback control parameters
+    juce::AudioParameterFloat* attackParam;
+    juce::AudioParameterFloat* releaseParam;
+    juce::AudioParameterFloat* rootNoteParam;
+    juce::AudioParameterBool* oneShot;
+    
+    // Trigger sample playback for testing
+    void triggerSample(int midiNoteNumber, float velocity);
+    
+    // Added method to check if the entire sample is loaded
+    bool isSampleFullyLoaded() const;
+    
+    // Get current streaming sound (if any)
+    StreamingSamplerSound* getCurrentStreamingSound();
+    
 private:
     juce::Synthesiser sampler;
     juce::AudioFormatManager formatManager;
     juce::AudioFormatReader* formatReader { nullptr };
     juce::String currentlyLoadedFilePath;
     int voiceCount { 128 };  // Maximum number of voices
+    
+    // Added streaming support
+    std::atomic<bool> sampleTriggered { false };
+    
+    // Update the sampler sound parameters
+    void updateSamplerSound();
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
 };

@@ -78,6 +78,12 @@ juce_add_plugin("${PROJECT_NAME}"
     PLUGIN_CODE S001
     FORMATS "${FORMATS}"
 
+    # Whether the plugin is a synth. Will be used to set sensible plugin category values if they are not provided explicitly.
+    IS_SYNTH TRUE
+
+    # Whether the plugin should provide a midi input.
+    NEEDS_MIDI_INPUT TRUE
+
     # The name of your final executable
     # This is how it's listed in the DAW
     # This can be different from PROJECT_NAME and can have spaces!
@@ -90,10 +96,11 @@ add_library(SharedCode INTERFACE)
 
 clap_juce_extensions_plugin(TARGET "${PROJECT_NAME}"
     CLAP_ID "${BUNDLE_ID}"
-    CLAP_FEATURES audio-effect)
+    CLAP_FEATURES instrument synth)
 
 # Enable fast math, C++20 and a few other target defaults
 include(SharedCodeDefaults)
+
 
 
 # Manually list all .h and .cpp files for the plugin
