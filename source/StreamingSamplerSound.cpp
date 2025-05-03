@@ -1,30 +1,54 @@
 #include "StreamingSamplerSound.h"
 
-// Inner class for background prefetching of chunks
-class StreamingSamplerSound::PrefetchJob : public juce::TimeSliceClient
+// Implementation of the PrefetchClient
+PrefetchClient::PrefetchClient(StreamingThreadManager& owner) 
+    : manager(owner) 
 {
-public:
-    PrefetchJob(StreamingSamplerSound& owner) : sound(owner) {}
+}
+
+int PrefetchClient::useTimeSlice()
+{
+    // Loop through all sounds and try to load a chunk
+    const juce::ScopedLock sl(manager.soundsLock);
     
-    int useTimeSlice() override
+    for (auto* sound : manager.managedSounds)
     {
-        // Try to prefetch the next chunk that's needed
-        int numChunks = sound.chunks.size();
+        if (sound == nullptr)
+            continue;
+            
+        // Check if this sound needs any chunks loaded
+        int numChunks = sound->chunks.size();
+        bool loadedChunk = false;
         
         for (int i = 0; i < numChunks; ++i)
         {
-            if (!sound.chunks[i]->loaded.load())
+            if (!sound->chunks[i]->loaded.load())
             {
-                sound.loadChunk(i);
-                return 250; // Wait for 250ms before prefetching the next chunk
+                if (sound->loadChunk(i))
+                {
+                    loadedChunk = true;
+                    break; // Only load one chunk per time slice
+                }
             }
         }
         
-        // Check if we've loaded all chunks
+        if (loadedChunk)
+            return 10; // Small pause before loading the next chunk
+    }
+    
+    // Update fully loaded status for all sounds
+    for (auto* sound : manager.managedSounds)
+    {
+        if (sound == nullptr)
+            continue;
+            
+        // Check if all chunks are loaded for this sound
         bool allLoaded = true;
+        int numChunks = sound->chunks.size();
+        
         for (int i = 0; i < numChunks; ++i)
         {
-            if (!sound.chunks[i]->loaded.load())
+            if (!sound->chunks[i]->loaded.load())
             {
                 allLoaded = false;
                 break;
@@ -32,23 +56,81 @@ public:
         }
         
         if (allLoaded)
-            sound.fullyLoaded.store(true);
-            
-        return 1000; // Check again in 1 second if no chunks needed loading
+            sound->fullyLoaded.store(true);
     }
     
-private:
-    StreamingSamplerSound& sound;
-};
+    return 100; // Longer pause if no chunks needed loading
+}
 
+// Implementation of StreamingThreadManager
+StreamingThreadManager::StreamingThreadManager()
+    : prefetchThread(new juce::TimeSliceThread("Sample Prefetch Thread"))
+{
+    prefetchThread->startThread(juce::Thread::Priority::background);
+    prefetchClient.reset(new PrefetchClient(*this));
+    prefetchThread->addTimeSliceClient(prefetchClient.get());
+}
+
+StreamingThreadManager::~StreamingThreadManager()
+{
+    if (prefetchThread != nullptr)
+    {
+        if (prefetchClient != nullptr)
+            prefetchThread->removeTimeSliceClient(prefetchClient.get());
+            
+        prefetchThread->stopThread(500);
+    }
+}
+
+void StreamingThreadManager::addSound(StreamingSamplerSound* sound)
+{
+    if (sound == nullptr)
+        return;
+        
+    const juce::ScopedLock sl(soundsLock);
+    if (!managedSounds.contains(sound))
+        managedSounds.add(sound);
+}
+
+void StreamingThreadManager::removeSound(StreamingSamplerSound* sound)
+{
+    if (sound == nullptr)
+        return;
+        
+    const juce::ScopedLock sl(soundsLock);
+    managedSounds.removeAllInstancesOf(sound);
+}
+
+void StreamingThreadManager::prioritizeSound(StreamingSamplerSound* sound)
+{
+    if (sound == nullptr)
+        return;
+        
+    const juce::ScopedLock sl(soundsLock);
+    
+    // Move this sound to the front of the array so it gets processed first
+    if (managedSounds.contains(sound))
+    {
+        managedSounds.removeAllInstancesOf(sound);
+        managedSounds.insert(0, sound);
+    }
+    else
+    {
+        // Sound wasn't in the list yet, so add it at the front
+        managedSounds.insert(0, sound);
+    }
+}
+
+// Implementation of StreamingSamplerSound
 StreamingSamplerSound::StreamingSamplerSound(const juce::String& soundName,
-                                           juce::AudioFormatReader& source,
-                                           const juce::BigInteger& notes,
-                                           int midiNoteForNormalPitch,
-                                           double attackTimeSecs,
-                                           double releaseTimeSecs,
-                                           double maxSampleLengthSeconds,
-                                           const juce::String& sourceFilePath)
+                                         juce::AudioFormatReader& source,
+                                         const juce::BigInteger& notes,
+                                         int midiNoteForNormalPitch,
+                                         double attackTimeSecs,
+                                         double releaseTimeSecs,
+                                         double maxSampleLengthSeconds,
+                                         StreamingThreadManager* thManager,
+                                         const juce::String& sourceFilePath)
     : juce::SamplerSound(soundName, source, notes, midiNoteForNormalPitch, 
                         attackTimeSecs, releaseTimeSecs, maxSampleLengthSeconds),
       name(soundName),
@@ -61,7 +143,7 @@ StreamingSamplerSound::StreamingSamplerSound(const juce::String& soundName,
       numChannels(source.numChannels),
       bitsPerSample(source.bitsPerSample),
       sourceSampleRate(source.sampleRate),
-      prefetchThread(new juce::TimeSliceThread("Sample Prefetch Thread"))
+      threadManager(thManager)
 {
     // Setup ADSR parameters
     params.attack = static_cast<float>(attackTime);
@@ -69,9 +151,6 @@ StreamingSamplerSound::StreamingSamplerSound(const juce::String& soundName,
     params.decay = 0.1f;
     params.sustain = 1.0f;
 
-    // Start the prefetch thread
-    prefetchThread->startThread(juce::Thread::Priority::normal);
-    
     // Calculate how many chunks we need
     int numChunksNeeded = (lengthInSamples + CHUNK_SIZE - 1) / CHUNK_SIZE;
     chunks.resize(numChunksNeeded);
@@ -100,21 +179,16 @@ StreamingSamplerSound::StreamingSamplerSound(const juce::String& soundName,
         loadChunk(i);
     }
     
-    // Create and start the prefetch job
-    prefetchJob.reset(new PrefetchJob(*this));
-    prefetchThread->addTimeSliceClient(prefetchJob.get());
+    // Register with the thread manager if available
+    if (threadManager != nullptr)
+        threadManager->addSound(this);
 }
 
 StreamingSamplerSound::~StreamingSamplerSound()
 {
-    // Stop background loading
-    if (prefetchThread != nullptr)
-    {
-        if (prefetchJob != nullptr)
-            prefetchThread->removeTimeSliceClient(prefetchJob.get());
-            
-        prefetchThread->stopThread(1000);
-    }
+    // Unregister from the thread manager if available
+    if (threadManager != nullptr)
+        threadManager->removeSound(this);
 }
 
 bool StreamingSamplerSound::appliesToNote(int midiNoteNumber)
@@ -167,18 +241,18 @@ float StreamingSamplerSound::getSample(int channel, int sampleIndex)
     return 0.0f;
 }
 
-void StreamingSamplerSound::loadChunk(int chunkIndex)
+bool StreamingSamplerSound::loadChunk(int chunkIndex)
 {
     if (chunkIndex < 0 || chunkIndex >= chunks.size())
-        return;
+        return false;
         
     // Skip if this chunk is already loaded
     if (chunks[chunkIndex]->loaded.load())
-        return;
+        return false;
         
     // Skip if we don't have a valid reader
     if (reader == nullptr)
-        return;
+        return false;
         
     const juce::ScopedLock sl(chunkMutex);
     
@@ -189,7 +263,7 @@ void StreamingSamplerSound::loadChunk(int chunkIndex)
     auto samplesThisChunk = juce::jmin(CHUNK_SIZE, lengthInSamples - startSample);
     
     if (samplesThisChunk <= 0)
-        return;
+        return false;
     
     // Resize the buffer for this chunk
     chunks[chunkIndex]->data.setSize(numChannels, samplesThisChunk);
@@ -199,6 +273,8 @@ void StreamingSamplerSound::loadChunk(int chunkIndex)
     
     // Mark the chunk as loaded
     chunks[chunkIndex]->loaded.store(true);
+    
+    return true;
 }
 
 int StreamingSamplerSound::sampleToChunkIndex(int sampleIndex) const
@@ -212,11 +288,7 @@ void StreamingSamplerSound::startBackgroundLoading()
     if (fullyLoaded.load())
         return;
         
-    // Make sure all chunks are marked for loading
-    if (prefetchJob != nullptr && prefetchThread != nullptr)
-    {
-        // Bump up the priority of this sound in the prefetch queue
-        // The prefetch thread will take care of loading the chunks
-        prefetchThread->moveToFrontOfQueue(prefetchJob.get());
-    }
+    // Prioritize this sound in the thread manager if available
+    if (threadManager != nullptr)
+        threadManager->prioritizeSound(this);
 }

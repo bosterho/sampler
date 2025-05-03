@@ -100,6 +100,9 @@ private:
     juce::String currentlyLoadedFilePath;
     int voiceCount { 128 };  // Maximum number of voices
     
+    // Thread manager for sample streaming
+    std::unique_ptr<StreamingThreadManager> streamingThreadManager;
+    
     // Sample mapping data
     juce::OwnedArray<SampleInfo> sampleInfos;
     

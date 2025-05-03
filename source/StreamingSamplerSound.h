@@ -3,6 +3,45 @@
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_audio_formats/juce_audio_formats.h>
 
+// Forward declarations
+class StreamingSamplerSound;
+class PrefetchClient;  // Forward declare our prefetch client
+
+// A class that manages a thread for stream-loading sample chunks
+class StreamingThreadManager
+{
+public:
+    StreamingThreadManager();
+    ~StreamingThreadManager();
+    
+    // Add a sample to be managed by this thread
+    void addSound(StreamingSamplerSound* sound);
+    
+    // Remove a sample from management
+    void removeSound(StreamingSamplerSound* sound);
+    
+    // Prioritize loading a specific sample
+    void prioritizeSound(StreamingSamplerSound* sound);
+    
+private:
+    // The single background thread for all samples
+    std::unique_ptr<juce::TimeSliceThread> prefetchThread;
+    
+    // Instance of the prefetch client
+    std::unique_ptr<PrefetchClient> prefetchClient;
+    
+    // The list of sounds being managed by this thread
+    juce::Array<StreamingSamplerSound*> managedSounds;
+    
+    // Lock for thread-safe access to the sounds list
+    juce::CriticalSection soundsLock;
+    
+    // Allow prefetch client to access our private members
+    friend class PrefetchClient;
+    
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(StreamingThreadManager)
+};
+
 // A class that manages audio data streaming in chunks
 class StreamingSamplerSound : public juce::SamplerSound
 {
@@ -14,6 +53,7 @@ public:
                          double attackTimeSecs,
                          double releaseTimeSecs,
                          double maxSampleLengthSeconds,
+                         StreamingThreadManager* threadManager,
                          const juce::String& sourceFilePath = "");
     
     ~StreamingSamplerSound() override;
@@ -41,6 +81,9 @@ public:
     juce::ADSR::Parameters params;
     double sourceSampleRate;
     int midiRootNote;
+    
+    // Load a specific chunk (public for thread manager)
+    bool loadChunk(int chunkIndex);
     
 private:
     juce::String name;
@@ -78,18 +121,26 @@ private:
     // Mutex for thread-safe chunk access
     juce::CriticalSection chunkMutex;
     
-    // Load a specific chunk
-    void loadChunk(int chunkIndex);
-    
     // Calculate which chunk contains a particular sample
     int sampleToChunkIndex(int sampleIndex) const;
     
-    // Background thread for prefetching chunks
-    std::unique_ptr<juce::TimeSliceThread> prefetchThread;
-    class PrefetchJob;
-    std::unique_ptr<PrefetchJob> prefetchJob;
+    // Pointer to the thread manager (not owned by this class)
+    StreamingThreadManager* threadManager;
     
-    friend class PrefetchJob;
+    // Make the prefetch client a friend so it can access our private data
+    friend class PrefetchClient;
     
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(StreamingSamplerSound)
+};
+
+// Definition of the PrefetchClient as a standalone class
+class PrefetchClient : public juce::TimeSliceClient
+{
+public:
+    PrefetchClient(StreamingThreadManager& owner);
+    
+    int useTimeSlice() override;
+    
+private:
+    StreamingThreadManager& manager;
 };

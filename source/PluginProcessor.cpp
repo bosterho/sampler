@@ -14,6 +14,9 @@ PluginProcessor::PluginProcessor()
 {
     formatManager.registerBasicFormats();
     
+    // Create the thread manager for sample streaming
+    streamingThreadManager = std::make_unique<StreamingThreadManager>();
+    
     // Initialize the sampler with our custom streaming voices
     for (int i = 0; i < voiceCount; ++i)
         sampler.addVoice(new StreamingSamplerVoice());
@@ -362,15 +365,18 @@ void PluginProcessor::loadFile(const juce::File& file)
         juce::BigInteger allNotes;
         allNotes.setRange(0, 128, true);
         
-        // Create a streaming sound
-        auto sound = new StreamingSamplerSound(file.getFileName(),
-                                               *reader,
-                                               allNotes,
-                                               60,   // Root note (Middle C)
-                                               0.1,  // Attack time
-                                               0.1,  // Release time
-                                               10.0, // Maximum sample length
-                                               file.getFullPathName()); // Pass the file path
+        // Create a streaming sound object with properly specified parameters
+        auto sound = new StreamingSamplerSound(
+            file.getFileName(),            // name
+            *reader,                        // source
+            allNotes,                       // midiNotes
+            60,                             // midiRootNote
+            0.1,                            // attackTime
+            0.1,                            // releaseTime
+            10.0,                           // maxSampleLengthSeconds
+            streamingThreadManager.get(),   // threadManager
+            file.getFullPathName()          // sourceFilePath
+        );
         
         sampler.addSound(sound);
         currentlyLoadedFilePath = file.getFullPathName();
@@ -604,6 +610,7 @@ void PluginProcessor::addSampleToSampler(const SampleInfo& info)
             0.01,  // Default attack time
             0.1,   // Default release time
             10.0,  // Maximum sample length in seconds
+            streamingThreadManager.get(), // Pass our thread manager
             info.file.getFullPathName()); // Pass the file path
         
         // Add the sound to the sampler
